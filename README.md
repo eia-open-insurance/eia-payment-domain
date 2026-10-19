@@ -7,7 +7,7 @@
 - Owner: Payment
 - Runtime: Java 22 and Spring Boot
 - Data store: eia_payment (tx schema)
-- Depends on: eia-payment-expert, eia-contracts, eia-open-insurance-libs
+- Depends on: eia-payment-expert, eia-contracts, eia-platform/libs
 
 ## Purpose
 
