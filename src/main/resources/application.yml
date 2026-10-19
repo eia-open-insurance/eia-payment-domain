@@ -1,0 +1,13 @@
+server:
+  port: 8098
+spring:
+  application:
+    name: eia-payment-domain
+eia:
+  payment:
+    expert-url: http://localhost:8097
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
