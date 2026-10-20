@@ -57,7 +57,8 @@ public class PaymentClient {
     public PaymentDto create(UUID tenantId, CreatePaymentCommand command) {
         ExpertCreatePaymentRequest request = new ExpertCreatePaymentRequest(
                 tenantId, null, command.paymentType(), command.status(), command.amount(),
-                command.currency(), command.payeePartyId(), command.paymentDate());
+                command.currency(), command.payeePartyId(), command.paymentDate(),
+                command.sourceType(), command.sourceId(), command.sourceReference());
         try {
             return client.post()
                     .uri("/internal/v1/payments")
@@ -118,7 +119,10 @@ public class PaymentClient {
             BigDecimal amount,
             String currency,
             UUID payeePartyId,
-            LocalDate paymentDate
+            LocalDate paymentDate,
+            String sourceType,
+            UUID sourceId,
+            String sourceReference
     ) {}
 
     record StatusChangeRequest(String status, Integer expectedVersion, String reason) {}

@@ -58,7 +58,10 @@ public class PaymentService {
                 PaymentRules.normalizeAmount(command.amount()),
                 PaymentRules.normalizeCurrency(command.currency()),
                 command.payeePartyId(),
-                command.paymentDate());
+                command.paymentDate(),
+                PaymentRules.normalizeSourceType(command.sourceType()),
+                command.sourceId(),
+                PaymentRules.normalizeSourceReference(command.sourceReference()));
         return client.create(tenantId, normalized);
     }
 
@@ -108,7 +111,9 @@ public class PaymentService {
         String needle = query.toLowerCase(Locale.ROOT);
         return contains(payment.paymentNumber(), needle)
                 || contains(payment.paymentType(), needle)
-                || contains(payment.payeePartyId() == null ? null : payment.payeePartyId().toString(), needle);
+                || contains(payment.payeePartyId() == null ? null : payment.payeePartyId().toString(), needle)
+                || contains(payment.sourceId() == null ? null : payment.sourceId().toString(), needle)
+                || contains(payment.sourceReference(), needle);
     }
 
     private static boolean contains(String value, String needle) {
@@ -121,19 +126,32 @@ public class PaymentService {
                 payment.id(),
                 SEARCH_TYPE,
                 payment.paymentNumber(),
-                secondary(primary, payment.status()),
+                secondary(primary, payment.status(), payment.sourceReference()),
                 payment.status(),
                 "/payment?record=" + payment.id());
     }
 
-    private static String secondary(String primary, String status) {
-        if (isBlank(primary)) {
-            return status;
+    /**
+     * The shared search shape has no dedicated source field, so a payment's human
+     * source reference is appended to the secondary line:
+     * {@code INDEMNITY · DRAFT · CLM-2026-0000001}.
+     */
+    private static String secondary(String primary, String status, String sourceReference) {
+        StringBuilder value = new StringBuilder();
+        appendPart(value, primary);
+        appendPart(value, status);
+        appendPart(value, sourceReference);
+        return value.toString();
+    }
+
+    private static void appendPart(StringBuilder value, String part) {
+        if (isBlank(part)) {
+            return;
         }
-        if (isBlank(status)) {
-            return primary;
+        if (value.length() > 0) {
+            value.append(FIELD_SEPARATOR);
         }
-        return primary + FIELD_SEPARATOR + status;
+        value.append(part);
     }
 
     private static boolean isBlank(String value) {

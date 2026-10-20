@@ -7,6 +7,7 @@ import java.time.LocalDate;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -86,14 +87,57 @@ class PaymentRulesTest {
 
     @Test
     void rejectsCreateWithUnknownStatusOrType() {
-        CreatePaymentCommand badStatus = new CreatePaymentCommand("INDEMNITY", "PAID",
-                new BigDecimal("10.00"), "USD", PAYEE, LocalDate.of(2026, 10, 19));
+        CreatePaymentCommand badStatus = command("INDEMNITY", "PAID", null, null, null);
         assertEquals("VALIDATION_ERROR",
                 assertThrows(ApiException.class, () -> PaymentRules.validateCreate(badStatus)).code());
 
-        CreatePaymentCommand badType = new CreatePaymentCommand("BRIBE", null,
-                new BigDecimal("10.00"), "USD", PAYEE, LocalDate.of(2026, 10, 19));
+        CreatePaymentCommand badType = command("BRIBE", null, null, null, null);
         assertEquals("VALIDATION_ERROR",
                 assertThrows(ApiException.class, () -> PaymentRules.validateCreate(badType)).code());
+    }
+
+    @Test
+    void normalizesSourceTypeAndReference() {
+        assertEquals("DIRECT_CLAIM", PaymentRules.normalizeSourceType(" direct_claim "));
+        assertEquals("OTHER", PaymentRules.normalizeSourceType("other"));
+        assertNull(PaymentRules.normalizeSourceType(null));
+        assertNull(PaymentRules.normalizeSourceType("  "));
+        assertEquals("CLM-2026-0000001", PaymentRules.normalizeSourceReference("  CLM-2026-0000001  "));
+        assertNull(PaymentRules.normalizeSourceReference(" "));
+
+        assertEquals("INVALID_SOURCE_TYPE",
+                assertThrows(ApiException.class,
+                        () -> PaymentRules.normalizeSourceType("BRIBE")).code());
+        assertEquals("INVALID_SOURCE_REFERENCE",
+                assertThrows(ApiException.class,
+                        () -> PaymentRules.normalizeSourceReference("C".repeat(65))).code());
+    }
+
+    @Test
+    void validatesSourceLinkagePairing() {
+        UUID sourceId = UUID.randomUUID();
+
+        ApiException ex = assertThrows(ApiException.class,
+                () -> PaymentRules.validateCreate(
+                        command("INDEMNITY", null, "DIRECT_CLAIM", null, null)));
+        assertTrue(ex.details().stream().anyMatch(issue -> issue.field().equals("sourceId")));
+
+        ex = assertThrows(ApiException.class,
+                () -> PaymentRules.validateCreate(command("INDEMNITY", null, null, sourceId, null)));
+        assertTrue(ex.details().stream().anyMatch(issue -> issue.field().equals("sourceType")));
+
+        ex = assertThrows(ApiException.class,
+                () -> PaymentRules.validateCreate(command("INDEMNITY", null, "BRIBE", sourceId, null)));
+        assertTrue(ex.details().stream().anyMatch(issue -> issue.field().equals("sourceType")));
+
+        PaymentRules.validateCreate(command("INDEMNITY", null, "OTHER", null, "CLM-2026-0000001"));
+        PaymentRules.validateCreate(command("INDEMNITY", null, "POLICY", sourceId, "POL-2026-0000001"));
+        PaymentRules.validateCreate(command("INDEMNITY", null, null, null, null));
+    }
+
+    private static CreatePaymentCommand command(String paymentType, String status, String sourceType,
+                                                UUID sourceId, String sourceReference) {
+        return new CreatePaymentCommand(paymentType, status, new BigDecimal("10.00"), "USD", PAYEE,
+                LocalDate.of(2026, 10, 19), sourceType, sourceId, sourceReference);
     }
 }

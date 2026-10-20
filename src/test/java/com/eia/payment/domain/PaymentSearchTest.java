@@ -27,6 +27,7 @@ class PaymentSearchTest {
     private static final UUID OTHER_TENANT = UUID.fromString("99999999-9999-7999-8999-999999999999");
     private static final UUID PAYEE = UUID.fromString("22222222-2222-7222-8222-222222222222");
     private static final UUID PAYMENT_ID = UUID.fromString("33333333-3333-7333-8333-333333333333");
+    private static final UUID SOURCE_ID = UUID.fromString("44444444-4444-7444-8444-444444444444");
     private static final LocalDate PAYMENT_DATE = LocalDate.of(2026, 10, 19);
     private static final Instant BASE = Instant.parse("2026-10-19T12:00:00Z");
 
@@ -79,6 +80,68 @@ class PaymentSearchTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.items.length()").value(1))
                 .andExpect(jsonPath("$.items[0].id").value(PAYMENT_ID.toString()));
+    }
+
+    @Test
+    void matchesBySourceIdAsText() throws Exception {
+        when(client.findAll(TENANT)).thenReturn(List.of(
+                payment(PAYMENT_ID, TENANT, "PAY-2026-0000001", "INDEMNITY", "DRAFT", PAYEE, BASE,
+                        "DIRECT_CLAIM", SOURCE_ID, "CLM-2026-0000001"),
+                payment(UUID.randomUUID(), TENANT, "PAY-2026-0000002", "EXPENSE", "DRAFT",
+                        UUID.randomUUID(), BASE.plusSeconds(5))));
+
+        mvc.perform(get("/api/v1/payments/search")
+                        .param("q", "44444444-4444-7444-8444-444444444444")
+                        .header("X-EIA-Tenant", TENANT.toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items.length()").value(1))
+                .andExpect(jsonPath("$.items[0].id").value(PAYMENT_ID.toString()));
+    }
+
+    @Test
+    void matchesByPartialSourceId() throws Exception {
+        when(client.findAll(TENANT)).thenReturn(List.of(
+                payment(PAYMENT_ID, TENANT, "PAY-2026-0000001", "INDEMNITY", "DRAFT", PAYEE, BASE,
+                        "POLICY", SOURCE_ID, "POL-2026-0000001"),
+                payment(UUID.randomUUID(), TENANT, "PAY-2026-0000002", "EXPENSE", "DRAFT",
+                        UUID.randomUUID(), BASE.plusSeconds(5))));
+
+        mvc.perform(get("/api/v1/payments/search")
+                        .param("q", "4444-7444")
+                        .header("X-EIA-Tenant", TENANT.toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items.length()").value(1))
+                .andExpect(jsonPath("$.items[0].id").value(PAYMENT_ID.toString()));
+    }
+
+    @Test
+    void matchesBySourceReferenceCaseInsensitively() throws Exception {
+        when(client.findAll(TENANT)).thenReturn(List.of(
+                payment(PAYMENT_ID, TENANT, "PAY-2026-0000001", "INDEMNITY", "DRAFT", PAYEE, BASE,
+                        "DIRECT_CLAIM", SOURCE_ID, "CLM-2026-0000001"),
+                payment(UUID.randomUUID(), TENANT, "PAY-2026-0000002", "EXPENSE", "DRAFT",
+                        UUID.randomUUID(), BASE.plusSeconds(5))));
+
+        mvc.perform(get("/api/v1/payments/search")
+                        .param("q", "clm-2026-0000001")
+                        .header("X-EIA-Tenant", TENANT.toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items.length()").value(1))
+                .andExpect(jsonPath("$.items[0].id").value(PAYMENT_ID.toString()));
+    }
+
+    @Test
+    void appendsSourceReferenceToSecondaryLine() throws Exception {
+        when(client.findAll(TENANT)).thenReturn(List.of(
+                payment(PAYMENT_ID, TENANT, "PAY-2026-0000001", "INDEMNITY", "DRAFT", PAYEE, BASE,
+                        "DIRECT_CLAIM", SOURCE_ID, "CLM-2026-0000001")));
+
+        mvc.perform(get("/api/v1/payments/search")
+                        .param("q", "CLM-2026-0000001")
+                        .header("X-EIA-Tenant", TENANT.toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items[0].secondary")
+                        .value("INDEMNITY · DRAFT · CLM-2026-0000001"));
     }
 
     @Test
@@ -187,7 +250,14 @@ class PaymentSearchTest {
 
     private static PaymentDto payment(UUID id, UUID tenantId, String number, String type, String status,
                                       UUID payee, Instant updatedAt) {
+        return payment(id, tenantId, number, type, status, payee, updatedAt, null, null, null);
+    }
+
+    private static PaymentDto payment(UUID id, UUID tenantId, String number, String type, String status,
+                                      UUID payee, Instant updatedAt,
+                                      String sourceType, UUID sourceId, String sourceReference) {
         return new PaymentDto(id, tenantId, number, type, status, new BigDecimal("125000.0000"),
-                "USD", payee, PAYMENT_DATE, 0, BASE, updatedAt);
+                "USD", payee, PAYMENT_DATE, 0, BASE, updatedAt,
+                sourceType, sourceId, sourceReference);
     }
 }
