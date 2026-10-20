@@ -119,6 +119,25 @@ public class PaymentService {
                 "issued to SAP/bank");
     }
 
+    /**
+     * The expert owns the split rows and the payment-level totals; the domain
+     * forwards the tenant and the read model.
+     */
+    public PaymentAllocationSummary allocations(UUID tenantId, UUID paymentId) {
+        return client.findAllocations(tenantId, paymentId);
+    }
+
+    /**
+     * Normalizes the split's target and component before the expert persists it.
+     * An allocation that would take the payment above its amount is the expert's
+     * aggregate guard (PAY-06) and stays a 409.
+     */
+    public PaymentAllocation allocate(UUID tenantId, UUID paymentId,
+                                      CreatePaymentAllocationCommand command) {
+        return client.createAllocation(tenantId, paymentId,
+                PaymentAllocationRules.normalize(command));
+    }
+
     private static boolean matches(PaymentDto payment, String query) {
         if (query.isEmpty()) {
             return true;

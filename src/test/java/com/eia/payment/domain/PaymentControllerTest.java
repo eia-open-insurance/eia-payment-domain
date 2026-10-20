@@ -38,6 +38,7 @@ class PaymentControllerTest {
     private static final UUID PAYEE = UUID.fromString("22222222-2222-7222-8222-222222222222");
     private static final UUID PAYMENT_ID = UUID.fromString("33333333-3333-7333-8333-333333333333");
     private static final UUID SOURCE_ID = UUID.fromString("44444444-4444-7444-8444-444444444444");
+    private static final UUID ALLOCATION_ID = UUID.fromString("55555555-5555-7555-8555-555555555555");
     private static final LocalDate PAYMENT_DATE = LocalDate.of(2026, 10, 19);
     private static final Instant CREATED = Instant.parse("2026-10-19T12:00:00Z");
 
@@ -419,6 +420,168 @@ class PaymentControllerTest {
         verify(client, never()).changeStatus(any(), any(), anyString(), anyInt(), anyString());
     }
 
+    @Test
+    void returnsTheAllocationSummary() throws Exception {
+        when(client.findAllocations(TENANT, PAYMENT_ID)).thenReturn(allocationSummary());
+
+        mvc.perform(get("/api/v1/payments/{id}/allocations", PAYMENT_ID)
+                        .header("X-EIA-Tenant", TENANT.toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items[0].allocationId").value(ALLOCATION_ID.toString()))
+                .andExpect(jsonPath("$.items[0].paymentId").value(PAYMENT_ID.toString()))
+                .andExpect(jsonPath("$.items[0].targetType").value("DIRECT_CLAIM"))
+                .andExpect(jsonPath("$.items[0].targetId").value(SOURCE_ID.toString()))
+                .andExpect(jsonPath("$.items[0].component").value("INDEMNITY"))
+                .andExpect(jsonPath("$.items[0].amount").isString())
+                .andExpect(jsonPath("$.items[0].amount").value("1250.0000"))
+                .andExpect(jsonPath("$.items[0].currency").value("USD"))
+                .andExpect(jsonPath("$.paymentAmount").value("125000.0000"))
+                .andExpect(jsonPath("$.totalAllocated").value("1250.0000"))
+                .andExpect(jsonPath("$.unallocated").value("123750.0000"))
+                .andExpect(jsonPath("$.currency").value("USD"));
+
+        verify(client).findAllocations(TENANT, PAYMENT_ID);
+    }
+
+    @Test
+    void createsAnAllocation() throws Exception {
+        when(client.createAllocation(eq(TENANT), eq(PAYMENT_ID),
+                any(CreatePaymentAllocationCommand.class))).thenReturn(allocation());
+
+        mvc.perform(post("/api/v1/payments/{id}/allocations", PAYMENT_ID)
+                        .header("X-EIA-Tenant", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(
+                                new CreatePaymentAllocationCommand("direct_claim", SOURCE_ID,
+                                        "indemnity", new BigDecimal("1250.00")))))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.allocationId").value(ALLOCATION_ID.toString()))
+                .andExpect(jsonPath("$.paymentId").value(PAYMENT_ID.toString()))
+                .andExpect(jsonPath("$.targetType").value("DIRECT_CLAIM"))
+                .andExpect(jsonPath("$.targetId").value(SOURCE_ID.toString()))
+                .andExpect(jsonPath("$.component").value("INDEMNITY"))
+                .andExpect(jsonPath("$.amount").value("1250.0000"))
+                .andExpect(jsonPath("$.currency").value("USD"));
+
+        ArgumentCaptor<CreatePaymentAllocationCommand> captor =
+                ArgumentCaptor.forClass(CreatePaymentAllocationCommand.class);
+        verify(client).createAllocation(eq(TENANT), eq(PAYMENT_ID), captor.capture());
+        assertThat(captor.getValue().targetType()).isEqualTo("DIRECT_CLAIM");
+        assertThat(captor.getValue().component()).isEqualTo("INDEMNITY");
+        assertThat(captor.getValue().amount()).isEqualByComparingTo("1250.0000");
+        assertThat(captor.getValue().amount().scale()).isEqualTo(4);
+    }
+
+    @Test
+    void rejectsAnIncompleteAllocationBeforeCallingExpert() throws Exception {
+        mvc.perform(post("/api/v1/payments/{id}/allocations", PAYMENT_ID)
+                        .header("X-EIA-Tenant", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"targetType":"DIRECT_CLAIM","amount":10.00}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"))
+                .andExpect(jsonPath("$.details[0].field").value("targetId"))
+                .andExpect(jsonPath("$.details[1].field").value("component"));
+
+        verify(client, never()).createAllocation(any(), any(), any());
+    }
+
+    @Test
+    void rejectsUnknownAllocationVocabularyBeforeCallingExpert() throws Exception {
+        mvc.perform(post("/api/v1/payments/{id}/allocations", PAYMENT_ID)
+                        .header("X-EIA-Tenant", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(
+                                new CreatePaymentAllocationCommand("BRIBE", SOURCE_ID,
+                                        "BRIBE", new BigDecimal("10.00")))))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"))
+                .andExpect(jsonPath("$.details[0].field").value("targetType"))
+                .andExpect(jsonPath("$.details[0].message").value("Unknown target type: BRIBE"))
+                .andExpect(jsonPath("$.details[1].field").value("component"))
+                .andExpect(jsonPath("$.details[1].message").value("Unknown component: BRIBE"));
+
+        verify(client, never()).createAllocation(any(), any(), any());
+    }
+
+    @Test
+    void rejectsANonPositiveAllocationAmountBeforeCallingExpert() throws Exception {
+        mvc.perform(post("/api/v1/payments/{id}/allocations", PAYMENT_ID)
+                        .header("X-EIA-Tenant", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(
+                                new CreatePaymentAllocationCommand("DIRECT_CLAIM", SOURCE_ID,
+                                        "INDEMNITY", BigDecimal.ZERO))))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"))
+                .andExpect(jsonPath("$.details[0].field").value("amount"));
+
+        verify(client, never()).createAllocation(any(), any(), any());
+    }
+
+    @Test
+    void preservesTheExpertAllocationNotFound() throws Exception {
+        when(client.findAllocations(TENANT, PAYMENT_ID)).thenThrow(new ApiException(
+                HttpStatus.NOT_FOUND, "PAYMENT_NOT_FOUND", "Payment not found: " + PAYMENT_ID));
+
+        mvc.perform(get("/api/v1/payments/{id}/allocations", PAYMENT_ID)
+                        .header("X-EIA-Tenant", TENANT.toString()))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value("PAYMENT_NOT_FOUND"))
+                .andExpect(jsonPath("$.message").value("Payment not found: " + PAYMENT_ID))
+                .andExpect(jsonPath("$.path")
+                        .value("/api/v1/payments/" + PAYMENT_ID + "/allocations"));
+    }
+
+    @Test
+    void preservesTheExpertAllocationConflict() throws Exception {
+        when(client.createAllocation(eq(TENANT), eq(PAYMENT_ID),
+                any(CreatePaymentAllocationCommand.class))).thenThrow(new ApiException(
+                HttpStatus.CONFLICT, "ALLOCATION_EXCEEDS_PAYMENT",
+                "Allocations would total 126000.0000 for payment amount 125000.0000"));
+
+        mvc.perform(post("/api/v1/payments/{id}/allocations", PAYMENT_ID)
+                        .header("X-EIA-Tenant", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(
+                                new CreatePaymentAllocationCommand("DIRECT_CLAIM", SOURCE_ID,
+                                        "INDEMNITY", new BigDecimal("126000.00")))))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("ALLOCATION_EXCEEDS_PAYMENT"))
+                .andExpect(jsonPath("$.message")
+                        .value("Allocations would total 126000.0000 for payment amount 125000.0000"));
+    }
+
+    @Test
+    void preservesTheExpertNotAllocatableConflict() throws Exception {
+        when(client.createAllocation(eq(TENANT), eq(PAYMENT_ID),
+                any(CreatePaymentAllocationCommand.class))).thenThrow(new ApiException(
+                HttpStatus.CONFLICT, "PAYMENT_NOT_ALLOCATABLE",
+                "Payment PAY-2026-0044721 is CANCELLED and cannot be allocated"));
+
+        mvc.perform(post("/api/v1/payments/{id}/allocations", PAYMENT_ID)
+                        .header("X-EIA-Tenant", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(
+                                new CreatePaymentAllocationCommand("DIRECT_CLAIM", SOURCE_ID,
+                                        "INDEMNITY", new BigDecimal("1250.00")))))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("PAYMENT_NOT_ALLOCATABLE"))
+                .andExpect(jsonPath("$.message")
+                        .value("Payment PAY-2026-0044721 is CANCELLED and cannot be allocated"));
+    }
+
+    @Test
+    void requiresTenantForAllocationRoutes() throws Exception {
+        mvc.perform(get("/api/v1/payments/{id}/allocations", PAYMENT_ID))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("MISSING_TENANT_HEADER"));
+
+        verify(client, never()).findAllocations(any(), any());
+    }
+
     private static CreatePaymentCommand command(BigDecimal amount, String currency, String paymentType) {
         return command(amount, currency, paymentType, null, null, null);
     }
@@ -439,5 +602,15 @@ class PaymentControllerTest {
         return new PaymentDto(PAYMENT_ID, TENANT, "PAY-2026-0044721", "INDEMNITY", "DRAFT",
                 new BigDecimal("125000.0000"), "USD", PAYEE, PAYMENT_DATE, 0, CREATED, CREATED,
                 sourceType, sourceId, sourceReference);
+    }
+
+    private static PaymentAllocation allocation() {
+        return new PaymentAllocation(ALLOCATION_ID, PAYMENT_ID, "DIRECT_CLAIM", SOURCE_ID, "INDEMNITY",
+                new BigDecimal("1250.0000"), "USD", CREATED);
+    }
+
+    private static PaymentAllocationSummary allocationSummary() {
+        return new PaymentAllocationSummary(List.of(allocation()), new BigDecimal("125000.0000"),
+                new BigDecimal("1250.0000"), new BigDecimal("123750.0000"), "USD");
     }
 }

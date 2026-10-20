@@ -69,4 +69,18 @@ public class PaymentController {
     public PaymentDto issue(@RequestHeader("X-EIA-Tenant") UUID tenantId, @PathVariable UUID id) {
         return service.issue(tenantId, id);
     }
+
+    @GetMapping("/{id}/allocations")
+    public PaymentAllocationSummary allocations(@RequestHeader("X-EIA-Tenant") UUID tenantId,
+                                                @PathVariable UUID id) {
+        return service.allocations(tenantId, id);
+    }
+
+    @PostMapping("/{id}/allocations")
+    @ResponseStatus(HttpStatus.CREATED)
+    public PaymentAllocation allocate(@RequestHeader("X-EIA-Tenant") UUID tenantId,
+                                      @PathVariable UUID id,
+                                      @RequestBody CreatePaymentAllocationCommand command) {
+        return service.allocate(tenantId, id, command);
+    }
 }

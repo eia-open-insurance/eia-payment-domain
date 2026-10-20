@@ -113,6 +113,60 @@ public class PaymentClient {
         }
     }
 
+    /**
+     * The expert owns the allocation rows, their ordering, and the payment
+     * totals. The domain forwards the tenant and normalizes a missing row list
+     * or missing totals so the public summary is always well formed.
+     */
+    public PaymentAllocationSummary findAllocations(UUID tenantId, UUID paymentId) {
+        try {
+            PaymentAllocationSummary summary = client.get()
+                    .uri(uri -> uri.path("/internal/v1/payments/{id}/allocations")
+                            .queryParam("tenantId", tenantId).build(paymentId))
+                    .header(TENANT_HEADER, tenantId.toString())
+                    .retrieve()
+                    .body(PaymentAllocationSummary.class);
+            return normalize(summary);
+        } catch (RestClientResponseException ex) {
+            throw translate(ex);
+        }
+    }
+
+    public PaymentAllocation createAllocation(UUID tenantId, UUID paymentId,
+                                              CreatePaymentAllocationCommand command) {
+        try {
+            return client.post()
+                    .uri(uri -> uri.path("/internal/v1/payments/{id}/allocations")
+                            .queryParam("tenantId", tenantId).build(paymentId))
+                    .header(TENANT_HEADER, tenantId.toString())
+                    .body(command)
+                    .retrieve()
+                    .body(PaymentAllocation.class);
+        } catch (RestClientResponseException ex) {
+            throw translate(ex);
+        }
+    }
+
+    private static PaymentAllocationSummary normalize(PaymentAllocationSummary summary) {
+        if (summary == null) {
+            return new PaymentAllocationSummary(List.of(), null, BigDecimal.ZERO, null, null);
+        }
+        List<PaymentAllocation> items = summary.items() == null ? List.of() : summary.items();
+        BigDecimal totalAllocated = summary.totalAllocated();
+        if (totalAllocated == null) {
+            totalAllocated = items.stream()
+                    .map(PaymentAllocation::amount)
+                    .filter(amount -> amount != null)
+                    .reduce(BigDecimal.ZERO, BigDecimal::add);
+        }
+        BigDecimal unallocated = summary.unallocated();
+        if (unallocated == null && summary.paymentAmount() != null) {
+            unallocated = summary.paymentAmount().subtract(totalAllocated);
+        }
+        return new PaymentAllocationSummary(items, summary.paymentAmount(), totalAllocated,
+                unallocated, summary.currency());
+    }
+
     private ApiException translate(RestClientResponseException ex) {
         int status = ex.getStatusCode().value();
         String code = null;

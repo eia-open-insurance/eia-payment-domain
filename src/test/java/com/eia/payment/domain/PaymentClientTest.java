@@ -9,6 +9,7 @@ import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.RestClient;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.UUID;
@@ -28,6 +29,7 @@ class PaymentClientTest {
     private static final UUID PAYEE = UUID.fromString("22222222-2222-7222-8222-222222222222");
     private static final UUID PAYMENT_ID = UUID.fromString("33333333-3333-7333-8333-333333333333");
     private static final UUID SOURCE_ID = UUID.fromString("44444444-4444-7444-8444-444444444444");
+    private static final UUID ALLOCATION_ID = UUID.fromString("55555555-5555-7555-8555-555555555555");
 
     @Test
     void sendsAndReadsSourceLinkage() {
@@ -181,6 +183,188 @@ class PaymentClientTest {
                             .isEqualTo("sourceType is required when sourceId is supplied");
                 });
         server.verify();
+    }
+
+    @Test
+    void readsTheAllocationSummaryWithTenantForwarded() {
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        PaymentClient client = new PaymentClient(builder, new ObjectMapper(), "http://localhost:8097");
+
+        server.expect(requestTo("http://localhost:8097/internal/v1/payments/" + PAYMENT_ID
+                        + "/allocations?tenantId=" + TENANT))
+                .andExpect(method(HttpMethod.GET))
+                .andExpect(header(PaymentClient.TENANT_HEADER, TENANT.toString()))
+                .andRespond(withSuccess(allocationSummaryJson(), MediaType.APPLICATION_JSON));
+
+        PaymentAllocationSummary summary = client.findAllocations(TENANT, PAYMENT_ID);
+
+        assertThat(summary.paymentAmount()).isEqualByComparingTo("125000.0000");
+        assertThat(summary.totalAllocated()).isEqualByComparingTo("1250.0000");
+        assertThat(summary.unallocated()).isEqualByComparingTo("123750.0000");
+        assertThat(summary.currency()).isEqualTo("USD");
+        assertThat(summary.items()).singleElement().satisfies(allocation -> {
+            assertThat(allocation.allocationId()).isEqualTo(ALLOCATION_ID);
+            assertThat(allocation.paymentId()).isEqualTo(PAYMENT_ID);
+            assertThat(allocation.targetType()).isEqualTo("DIRECT_CLAIM");
+            assertThat(allocation.targetId()).isEqualTo(SOURCE_ID);
+            assertThat(allocation.component()).isEqualTo("INDEMNITY");
+            assertThat(allocation.amount()).isEqualByComparingTo("1250.0000");
+            assertThat(allocation.currency()).isEqualTo("USD");
+            assertThat(allocation.createdAt()).isEqualTo(Instant.parse("2026-10-20T09:15:00Z"));
+        });
+        server.verify();
+    }
+
+    @Test
+    void createsAnAllocationWithTenantForwarded() {
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        PaymentClient client = new PaymentClient(builder, new ObjectMapper(), "http://localhost:8097");
+
+        server.expect(requestTo("http://localhost:8097/internal/v1/payments/" + PAYMENT_ID
+                        + "/allocations?tenantId=" + TENANT))
+                .andExpect(method(HttpMethod.POST))
+                .andExpect(header(PaymentClient.TENANT_HEADER, TENANT.toString()))
+                .andExpect(jsonPath("$.targetType").value("DIRECT_CLAIM"))
+                .andExpect(jsonPath("$.targetId").value(SOURCE_ID.toString()))
+                .andExpect(jsonPath("$.component").value("INDEMNITY"))
+                .andExpect(jsonPath("$.amount").value(1250.0000))
+                .andRespond(withStatus(HttpStatus.CREATED)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .body(allocationJson()));
+
+        PaymentAllocation allocation = client.createAllocation(TENANT, PAYMENT_ID,
+                new CreatePaymentAllocationCommand("DIRECT_CLAIM", SOURCE_ID, "INDEMNITY",
+                        new BigDecimal("1250.00")));
+
+        assertThat(allocation.allocationId()).isEqualTo(ALLOCATION_ID);
+        assertThat(allocation.paymentId()).isEqualTo(PAYMENT_ID);
+        assertThat(allocation.targetType()).isEqualTo("DIRECT_CLAIM");
+        assertThat(allocation.targetId()).isEqualTo(SOURCE_ID);
+        assertThat(allocation.component()).isEqualTo("INDEMNITY");
+        assertThat(allocation.amount()).isEqualByComparingTo("1250.0000");
+        assertThat(allocation.currency()).isEqualTo("USD");
+        server.verify();
+    }
+
+    @Test
+    void preservesTheExpertAllocationBadRequest() {
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        PaymentClient client = new PaymentClient(builder, new ObjectMapper(), "http://localhost:8097");
+
+        server.expect(requestTo("http://localhost:8097/internal/v1/payments/" + PAYMENT_ID
+                        + "/allocations?tenantId=" + TENANT))
+                .andExpect(method(HttpMethod.POST))
+                .andExpect(header(PaymentClient.TENANT_HEADER, TENANT.toString()))
+                .andRespond(withStatus(HttpStatus.BAD_REQUEST)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .body("""
+                                {"status":400,"code":"VALIDATION_ERROR",
+                                 "message":"Payment allocation validation failed",
+                                 "path":"/internal/v1/payments","details":[]}
+                                """));
+
+        assertThatThrownBy(() -> client.createAllocation(TENANT, PAYMENT_ID,
+                new CreatePaymentAllocationCommand("DIRECT_CLAIM", SOURCE_ID, "BRIBE",
+                        new BigDecimal("10.00"))))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> {
+                    ApiException api = (ApiException) ex;
+                    assertThat(api.status()).isEqualTo(HttpStatus.BAD_REQUEST);
+                    assertThat(api.code()).isEqualTo("VALIDATION_ERROR");
+                    assertThat(api.getMessage()).isEqualTo("Payment allocation validation failed");
+                });
+        server.verify();
+    }
+
+    @Test
+    void preservesTheExpertAllocationNotFound() {
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        PaymentClient client = new PaymentClient(builder, new ObjectMapper(), "http://localhost:8097");
+
+        server.expect(requestTo("http://localhost:8097/internal/v1/payments/" + PAYMENT_ID
+                        + "/allocations?tenantId=" + TENANT))
+                .andExpect(method(HttpMethod.GET))
+                .andExpect(header(PaymentClient.TENANT_HEADER, TENANT.toString()))
+                .andRespond(withStatus(HttpStatus.NOT_FOUND)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .body("""
+                                {"status":404,"code":"PAYMENT_NOT_FOUND",
+                                 "message":"Payment not found: 33333333-3333-7333-8333-333333333333",
+                                 "path":"/internal/v1/payments","details":[]}
+                                """));
+
+        assertThatThrownBy(() -> client.findAllocations(TENANT, PAYMENT_ID))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> {
+                    ApiException api = (ApiException) ex;
+                    assertThat(api.status()).isEqualTo(HttpStatus.NOT_FOUND);
+                    assertThat(api.code()).isEqualTo("PAYMENT_NOT_FOUND");
+                    assertThat(api.getMessage()).contains("Payment not found");
+                });
+        server.verify();
+    }
+
+    @Test
+    void preservesTheExpertAllocationConflict() {
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        PaymentClient client = new PaymentClient(builder, new ObjectMapper(), "http://localhost:8097");
+
+        server.expect(requestTo("http://localhost:8097/internal/v1/payments/" + PAYMENT_ID
+                        + "/allocations?tenantId=" + TENANT))
+                .andExpect(method(HttpMethod.POST))
+                .andExpect(header(PaymentClient.TENANT_HEADER, TENANT.toString()))
+                .andRespond(withStatus(HttpStatus.CONFLICT)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .body("""
+                                {"status":409,"code":"ALLOCATION_EXCEEDS_PAYMENT",
+                                 "message":"Allocations would total 126000.0000 for payment amount 125000.0000",
+                                 "path":"/internal/v1/payments","details":[]}
+                                """));
+
+        assertThatThrownBy(() -> client.createAllocation(TENANT, PAYMENT_ID,
+                new CreatePaymentAllocationCommand("DIRECT_CLAIM", SOURCE_ID, "INDEMNITY",
+                        new BigDecimal("126000.00"))))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> {
+                    ApiException api = (ApiException) ex;
+                    assertThat(api.status()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(api.code()).isEqualTo("ALLOCATION_EXCEEDS_PAYMENT");
+                    assertThat(api.getMessage()).contains("126000.0000");
+                });
+        server.verify();
+    }
+
+    private static String allocationSummaryJson() {
+        return """
+                {
+                  "items": [%s],
+                  "paymentAmount": "125000.0000",
+                  "totalAllocated": "1250.0000",
+                  "unallocated": "123750.0000",
+                  "currency": "USD"
+                }
+                """.formatted(allocationJson());
+    }
+
+    /** The expert's public allocation item already uses the public field names. */
+    private static String allocationJson() {
+        return """
+                {
+                  "allocationId": "55555555-5555-7555-8555-555555555555",
+                  "paymentId": "33333333-3333-7333-8333-333333333333",
+                  "targetType": "DIRECT_CLAIM",
+                  "targetId": "44444444-4444-7444-8444-444444444444",
+                  "component": "INDEMNITY",
+                  "amount": "1250.0000",
+                  "currency": "USD",
+                  "createdAt": "2026-10-20T09:15:00Z"
+                }
+                """;
     }
 
     private static String paymentJson() {
