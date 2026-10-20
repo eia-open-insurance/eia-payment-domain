@@ -24,6 +24,21 @@ public class PaymentService {
     }
 
     /**
+     * Tenant-scoped list with the optional payment-source filter. The expert
+     * owns the pair rule and the closed source-type set, so an incomplete or
+     * unknown filter keeps the expert's 400 problem instead of being rewritten
+     * in the domain.
+     */
+    public List<PaymentDto> list(UUID tenantId, String sourceType, String sourceId) {
+        String type = trimToNull(sourceType);
+        String id = trimToNull(sourceId);
+        if (type == null && id == null) {
+            return client.findAll(tenantId);
+        }
+        return client.findAll(tenantId, type, id);
+    }
+
+    /**
      * Common global search. The tenant-scoped expert list is the only read path
      * available to the domain, so matching, ordering, and limiting happen here
      * and produce the shared search shape used by the shell.
@@ -156,5 +171,13 @@ public class PaymentService {
 
     private static boolean isBlank(String value) {
         return value == null || value.isBlank();
+    }
+
+    private static String trimToNull(String value) {
+        if (value == null) {
+            return null;
+        }
+        String trimmed = value.trim();
+        return trimmed.isEmpty() ? null : trimmed;
     }
 }

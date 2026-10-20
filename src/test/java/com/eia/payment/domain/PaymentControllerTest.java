@@ -64,6 +64,85 @@ class PaymentControllerTest {
     }
 
     @Test
+    void forwardsSourceFilterToTheExpert() throws Exception {
+        when(client.findAll(TENANT, "DIRECT_CLAIM", SOURCE_ID.toString()))
+                .thenReturn(List.of(paymentWithSource("DIRECT_CLAIM", SOURCE_ID, "CLM-2026-0000001")));
+
+        mvc.perform(get("/api/v1/payments")
+                        .header("X-EIA-Tenant", TENANT.toString())
+                        .param("sourceType", "DIRECT_CLAIM")
+                        .param("sourceId", SOURCE_ID.toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].sourceType").value("DIRECT_CLAIM"))
+                .andExpect(jsonPath("$[0].sourceId").value(SOURCE_ID.toString()));
+
+        verify(client).findAll(TENANT, "DIRECT_CLAIM", SOURCE_ID.toString());
+        verify(client, never()).findAll(TENANT);
+    }
+
+    @Test
+    void keepsUnfilteredListWhenNoSourceFilterIsSupplied() throws Exception {
+        when(client.findAll(TENANT)).thenReturn(List.of(payment("DRAFT", 0)));
+
+        mvc.perform(get("/api/v1/payments").header("X-EIA-Tenant", TENANT.toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].paymentNumber").value("PAY-2026-0044721"));
+
+        verify(client).findAll(TENANT);
+        verify(client, never()).findAll(any(), any(), any());
+    }
+
+    @Test
+    void preservesTheExpertSourceTypeWithoutSourceIdProblem() throws Exception {
+        when(client.findAll(TENANT, "DIRECT_CLAIM", null)).thenThrow(new ApiException(
+                HttpStatus.BAD_REQUEST, "INVALID_SOURCE_FILTER",
+                "sourceId is required when sourceType is supplied"));
+
+        mvc.perform(get("/api/v1/payments")
+                        .header("X-EIA-Tenant", TENANT.toString())
+                        .param("sourceType", "DIRECT_CLAIM"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_SOURCE_FILTER"))
+                .andExpect(jsonPath("$.message")
+                        .value("sourceId is required when sourceType is supplied"));
+
+        verify(client).findAll(TENANT, "DIRECT_CLAIM", null);
+    }
+
+    @Test
+    void preservesTheExpertSourceIdWithoutSourceTypeProblem() throws Exception {
+        when(client.findAll(TENANT, null, SOURCE_ID.toString())).thenThrow(new ApiException(
+                HttpStatus.BAD_REQUEST, "INVALID_SOURCE_FILTER",
+                "sourceType is required when sourceId is supplied"));
+
+        mvc.perform(get("/api/v1/payments")
+                        .header("X-EIA-Tenant", TENANT.toString())
+                        .param("sourceId", SOURCE_ID.toString()))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_SOURCE_FILTER"))
+                .andExpect(jsonPath("$.message")
+                        .value("sourceType is required when sourceId is supplied"));
+
+        verify(client).findAll(TENANT, null, SOURCE_ID.toString());
+    }
+
+    @Test
+    void preservesTheExpertUnknownSourceTypeProblem() throws Exception {
+        when(client.findAll(TENANT, "BRIBE", SOURCE_ID.toString())).thenThrow(new ApiException(
+                HttpStatus.BAD_REQUEST, "INVALID_SOURCE_TYPE", "Unknown source type: BRIBE"));
+
+        mvc.perform(get("/api/v1/payments")
+                        .header("X-EIA-Tenant", TENANT.toString())
+                        .param("sourceType", "BRIBE")
+                        .param("sourceId", SOURCE_ID.toString()))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_SOURCE_TYPE"))
+                .andExpect(jsonPath("$.message").value("Unknown source type: BRIBE"));
+
+        verify(client).findAll(TENANT, "BRIBE", SOURCE_ID.toString());
+    }
+
+    @Test
     void requiresTenantHeader() throws Exception {
         mvc.perform(get("/api/v1/payments"))
                 .andExpect(status().isBadRequest())

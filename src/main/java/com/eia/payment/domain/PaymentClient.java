@@ -16,6 +16,8 @@ import java.util.UUID;
 
 @Component
 public class PaymentClient {
+    public static final String TENANT_HEADER = "X-EIA-Tenant";
+
     private final RestClient client;
     private final ObjectMapper objectMapper;
 
@@ -30,6 +32,34 @@ public class PaymentClient {
         try {
             List<PaymentDto> payments = client.get()
                     .uri(uri -> uri.path("/internal/v1/payments").queryParam("tenantId", tenantId).build())
+                    .retrieve()
+                    .body(new ParameterizedTypeReference<>() {});
+            return payments == null ? List.of() : payments;
+        } catch (RestClientResponseException ex) {
+            throw translate(ex);
+        }
+    }
+
+    /**
+     * Tenant-scoped list, optionally narrowed to the payments linked to one
+     * source. The filter is evaluated by the expert so the domain never holds a
+     * second copy of the source linkage rules; expert 400 problems are preserved
+     * for the caller.
+     */
+    public List<PaymentDto> findAll(UUID tenantId, String sourceType, String sourceId) {
+        try {
+            List<PaymentDto> payments = client.get()
+                    .uri(uri -> {
+                        var builder = uri.path("/internal/v1/payments").queryParam("tenantId", tenantId);
+                        if (sourceType != null) {
+                            builder.queryParam("sourceType", sourceType);
+                        }
+                        if (sourceId != null) {
+                            builder.queryParam("sourceId", sourceId);
+                        }
+                        return builder.build();
+                    })
+                    .header(TENANT_HEADER, tenantId.toString())
                     .retrieve()
                     .body(new ParameterizedTypeReference<>() {});
             return payments == null ? List.of() : payments;

@@ -25,8 +25,10 @@ public class PaymentController {
     }
 
     @GetMapping
-    public List<PaymentDto> list(@RequestHeader("X-EIA-Tenant") UUID tenantId) {
-        return service.list(tenantId);
+    public List<PaymentDto> list(@RequestHeader("X-EIA-Tenant") UUID tenantId,
+                                 @RequestParam(name = "sourceType", required = false) String sourceType,
+                                 @RequestParam(name = "sourceId", required = false) String sourceId) {
+        return service.list(tenantId, sourceType, sourceId);
     }
 
     @GetMapping("/search")
