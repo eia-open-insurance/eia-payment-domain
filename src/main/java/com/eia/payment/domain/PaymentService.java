@@ -120,6 +120,16 @@ public class PaymentService {
     }
 
     /**
+     * Generic lifecycle transition. The expert owns the transition graph and
+     * optimistic concurrency, so its 400/404/409 problems are preserved for the
+     * caller instead of being re-derived here.
+     */
+    public PaymentDto updateStatus(UUID tenantId, UUID id, UpdatePaymentStatusCommand command) {
+        return client.changeStatus(tenantId, id, command.status(), command.expectedVersion(),
+                command.reason());
+    }
+
+    /**
      * The expert owns the split rows and the payment-level totals; the domain
      * forwards the tenant and the read model.
      */

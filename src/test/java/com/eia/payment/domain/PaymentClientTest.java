@@ -6,6 +6,7 @@ import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.client.MockRestServiceServer;
+import org.springframework.test.json.JsonCompareMode;
 import org.springframework.web.client.RestClient;
 
 import java.math.BigDecimal;
@@ -16,6 +17,7 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.springframework.test.web.client.match.MockRestRequestMatchers.content;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.header;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.jsonPath;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
@@ -181,6 +183,145 @@ class PaymentClientTest {
                     assertThat(api.code()).isEqualTo("INVALID_SOURCE_FILTER");
                     assertThat(api.getMessage())
                             .isEqualTo("sourceType is required when sourceId is supplied");
+                });
+        server.verify();
+    }
+
+    @Test
+    void forwardsStatusChangeWithTenantAndExactPayload() {
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        PaymentClient client = new PaymentClient(builder, new ObjectMapper(), "http://localhost:8097");
+
+        server.expect(requestTo("http://localhost:8097/internal/v1/payments/" + PAYMENT_ID
+                        + "/status?tenantId=" + TENANT))
+                .andExpect(method(HttpMethod.PATCH))
+                .andExpect(header(PaymentClient.TENANT_HEADER, TENANT.toString()))
+                .andExpect(content().json("""
+                        {"status":"CANCELLED","expectedVersion":3,"reason":"duplicate claim"}
+                        """, JsonCompareMode.STRICT))
+                .andRespond(withStatus(HttpStatus.OK)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .body(paymentJson("CANCELLED", 4)));
+
+        PaymentDto payment = client.changeStatus(TENANT, PAYMENT_ID, "CANCELLED", 3,
+                "duplicate claim");
+
+        assertThat(payment.status()).isEqualTo("CANCELLED");
+        assertThat(payment.version()).isEqualTo(4);
+        server.verify();
+    }
+
+    @Test
+    void forwardsAStatusChangeWithoutOptionalVersionOrReason() {
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        PaymentClient client = new PaymentClient(builder, new ObjectMapper(), "http://localhost:8097");
+
+        server.expect(requestTo("http://localhost:8097/internal/v1/payments/" + PAYMENT_ID
+                        + "/status?tenantId=" + TENANT))
+                .andExpect(method(HttpMethod.PATCH))
+                .andExpect(header(PaymentClient.TENANT_HEADER, TENANT.toString()))
+                .andExpect(content().json("""
+                        {"status":"PENDING_AUTHORITY","expectedVersion":null,"reason":null}
+                        """, JsonCompareMode.STRICT))
+                .andRespond(withStatus(HttpStatus.OK)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .body(paymentJson("PENDING_AUTHORITY", 1)));
+
+        PaymentDto payment = client.changeStatus(TENANT, PAYMENT_ID, "PENDING_AUTHORITY", null, null);
+
+        assertThat(payment.status()).isEqualTo("PENDING_AUTHORITY");
+        assertThat(payment.version()).isEqualTo(1);
+        server.verify();
+    }
+
+    @Test
+    void preservesTheExpertStatusBadRequest() {
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        PaymentClient client = new PaymentClient(builder, new ObjectMapper(), "http://localhost:8097");
+
+        server.expect(requestTo("http://localhost:8097/internal/v1/payments/" + PAYMENT_ID
+                        + "/status?tenantId=" + TENANT))
+                .andExpect(method(HttpMethod.PATCH))
+                .andExpect(header(PaymentClient.TENANT_HEADER, TENANT.toString()))
+                .andRespond(withStatus(HttpStatus.BAD_REQUEST)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .body("""
+                                {"status":400,"code":"INVALID_STATUS_TRANSITION",
+                                 "message":"Cannot transition payment from DRAFT to SUBMITTED",
+                                 "path":"/internal/v1/payments","details":[]}
+                                """));
+
+        assertThatThrownBy(() -> client.changeStatus(TENANT, PAYMENT_ID, "SUBMITTED", 0, null))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> {
+                    ApiException api = (ApiException) ex;
+                    assertThat(api.status()).isEqualTo(HttpStatus.BAD_REQUEST);
+                    assertThat(api.code()).isEqualTo("INVALID_STATUS_TRANSITION");
+                    assertThat(api.getMessage())
+                            .isEqualTo("Cannot transition payment from DRAFT to SUBMITTED");
+                });
+        server.verify();
+    }
+
+    @Test
+    void preservesTheExpertStatusNotFound() {
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        PaymentClient client = new PaymentClient(builder, new ObjectMapper(), "http://localhost:8097");
+
+        server.expect(requestTo("http://localhost:8097/internal/v1/payments/" + PAYMENT_ID
+                        + "/status?tenantId=" + TENANT))
+                .andExpect(method(HttpMethod.PATCH))
+                .andExpect(header(PaymentClient.TENANT_HEADER, TENANT.toString()))
+                .andRespond(withStatus(HttpStatus.NOT_FOUND)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .body("""
+                                {"status":404,"code":"PAYMENT_NOT_FOUND",
+                                 "message":"Payment not found: 33333333-3333-7333-8333-333333333333",
+                                 "path":"/internal/v1/payments","details":[]}
+                                """));
+
+        assertThatThrownBy(() -> client.changeStatus(TENANT, PAYMENT_ID, "CANCELLED", 0, null))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> {
+                    ApiException api = (ApiException) ex;
+                    assertThat(api.status()).isEqualTo(HttpStatus.NOT_FOUND);
+                    assertThat(api.code()).isEqualTo("PAYMENT_NOT_FOUND");
+                    assertThat(api.getMessage()).contains("Payment not found");
+                });
+        server.verify();
+    }
+
+    @Test
+    void preservesTheExpertStatusConflict() {
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        PaymentClient client = new PaymentClient(builder, new ObjectMapper(), "http://localhost:8097");
+
+        server.expect(requestTo("http://localhost:8097/internal/v1/payments/" + PAYMENT_ID
+                        + "/status?tenantId=" + TENANT))
+                .andExpect(method(HttpMethod.PATCH))
+                .andExpect(header(PaymentClient.TENANT_HEADER, TENANT.toString()))
+                .andRespond(withStatus(HttpStatus.CONFLICT)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .body("""
+                                {"status":409,"code":"CONCURRENT_MODIFICATION",
+                                 "message":"Expected version 2 but payment is at version 3",
+                                 "path":"/internal/v1/payments","details":[]}
+                                """));
+
+        assertThatThrownBy(() -> client.changeStatus(TENANT, PAYMENT_ID, "CANCELLED", 2,
+                "duplicate claim"))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> {
+                    ApiException api = (ApiException) ex;
+                    assertThat(api.status()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(api.code()).isEqualTo("CONCURRENT_MODIFICATION");
+                    assertThat(api.getMessage())
+                            .isEqualTo("Expected version 2 but payment is at version 3");
                 });
         server.verify();
     }
@@ -368,24 +509,28 @@ class PaymentClientTest {
     }
 
     private static String paymentJson() {
+        return paymentJson("DRAFT", 0);
+    }
+
+    private static String paymentJson(String status, int version) {
         return """
                 {
                   "id": "33333333-3333-7333-8333-333333333333",
                   "tenantId": "11111111-1111-7111-8111-111111111111",
                   "paymentNumber": "PAY-2026-0044721",
                   "paymentType": "INDEMNITY",
-                  "status": "DRAFT",
+                  "status": "%s",
                   "amount": "125000.0000",
                   "currency": "USD",
                   "payeePartyId": "22222222-2222-7222-8222-222222222222",
                   "paymentDate": "2026-10-19",
-                  "version": 0,
+                  "version": %d,
                   "createdAt": "2026-10-19T12:00:00Z",
                   "updatedAt": "2026-10-19T12:00:00Z",
                   "sourceType": "DIRECT_CLAIM",
                   "sourceId": "44444444-4444-7444-8444-444444444444",
                   "sourceReference": "CLM-2026-0000001"
                 }
-                """;
+                """.formatted(status, version);
     }
 }

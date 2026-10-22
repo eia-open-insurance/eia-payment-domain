@@ -27,6 +27,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -418,6 +419,109 @@ class PaymentControllerTest {
                 .andExpect(jsonPath("$.code").value("INVALID_STATUS_TRANSITION"));
 
         verify(client, never()).changeStatus(any(), any(), anyString(), anyInt(), anyString());
+    }
+
+    @Test
+    void updatesStatusThroughTheExpert() throws Exception {
+        when(client.changeStatus(TENANT, PAYMENT_ID, "CANCELLED", 2, "duplicate claim"))
+                .thenReturn(payment("CANCELLED", 3));
+
+        mvc.perform(patch("/api/v1/payments/{id}/status", PAYMENT_ID)
+                        .header("X-EIA-Tenant", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"status":"CANCELLED","expectedVersion":2,"reason":"duplicate claim"}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("CANCELLED"))
+                .andExpect(jsonPath("$.version").value(3));
+
+        verify(client).changeStatus(TENANT, PAYMENT_ID, "CANCELLED", 2, "duplicate claim");
+    }
+
+    @Test
+    void allowsStatusChangeWithoutExpectedVersion() throws Exception {
+        when(client.changeStatus(TENANT, PAYMENT_ID, "PENDING_AUTHORITY", null, null))
+                .thenReturn(payment("PENDING_AUTHORITY", 1));
+
+        mvc.perform(patch("/api/v1/payments/{id}/status", PAYMENT_ID)
+                        .header("X-EIA-Tenant", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"status":"PENDING_AUTHORITY"}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("PENDING_AUTHORITY"))
+                .andExpect(jsonPath("$.version").value(1));
+
+        verify(client).changeStatus(TENANT, PAYMENT_ID, "PENDING_AUTHORITY", null, null);
+    }
+
+    @Test
+    void rejectsBlankStatusBeforeCallingExpert() throws Exception {
+        mvc.perform(patch("/api/v1/payments/{id}/status", PAYMENT_ID)
+                        .header("X-EIA-Tenant", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"status":"   ","expectedVersion":0,"reason":"blank"}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"))
+                .andExpect(jsonPath("$.details[0].field").value("status"));
+
+        verify(client, never()).changeStatus(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void requiresTenantHeaderForStatusChange() throws Exception {
+        mvc.perform(patch("/api/v1/payments/{id}/status", PAYMENT_ID)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"status":"CANCELLED"}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("MISSING_TENANT_HEADER"));
+
+        verify(client, never()).changeStatus(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void preservesTheExpertStatusBadRequest() throws Exception {
+        when(client.changeStatus(TENANT, PAYMENT_ID, "SUBMITTED", 0, null))
+                .thenThrow(new ApiException(HttpStatus.BAD_REQUEST, "PAYMENT_NOT_APPROVED",
+                        "Payment must be approved before execution; current status is DRAFT"));
+
+        mvc.perform(patch("/api/v1/payments/{id}/status", PAYMENT_ID)
+                        .header("X-EIA-Tenant", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"status":"SUBMITTED","expectedVersion":0}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("PAYMENT_NOT_APPROVED"))
+                .andExpect(jsonPath("$.message").value(
+                        "Payment must be approved before execution; current status is DRAFT"))
+                .andExpect(jsonPath("$.path").value("/api/v1/payments/" + PAYMENT_ID + "/status"));
+    }
+
+    @Test
+    void preservesTheExpertStatusConflict() throws Exception {
+        when(client.changeStatus(TENANT, PAYMENT_ID, "CANCELLED", 2, "duplicate claim"))
+                .thenThrow(new ApiException(HttpStatus.CONFLICT, "CONCURRENT_MODIFICATION",
+                        "Expected version 2 but payment is at version 3"));
+
+        mvc.perform(patch("/api/v1/payments/{id}/status", PAYMENT_ID)
+                        .header("X-EIA-Tenant", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"status":"CANCELLED","expectedVersion":2,"reason":"duplicate claim"}
+                                """))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.status").value(409))
+                .andExpect(jsonPath("$.code").value("CONCURRENT_MODIFICATION"))
+                .andExpect(jsonPath("$.message")
+                        .value("Expected version 2 but payment is at version 3"))
+                .andExpect(jsonPath("$.path").value("/api/v1/payments/" + PAYMENT_ID + "/status"));
     }
 
     @Test

@@ -100,11 +100,17 @@ public class PaymentClient {
         }
     }
 
+    /**
+     * Forwards one lifecycle transition with the tenant in both the query and
+     * the tenant header. The expert owns transition and version checks; the
+     * caller receives its 400/404/409 problems unchanged.
+     */
     public PaymentDto changeStatus(UUID tenantId, UUID id, String status, Integer expectedVersion, String reason) {
         try {
             return client.patch()
                     .uri(uri -> uri.path("/internal/v1/payments/{id}/status")
                             .queryParam("tenantId", tenantId).build(id))
+                    .header(TENANT_HEADER, tenantId.toString())
                     .body(new StatusChangeRequest(status, expectedVersion, reason))
                     .retrieve()
                     .body(PaymentDto.class);
