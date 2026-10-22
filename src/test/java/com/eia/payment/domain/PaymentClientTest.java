@@ -70,9 +70,29 @@ class PaymentClientTest {
                 LocalDate.of(2026, 10, 19), "DIRECT_CLAIM", SOURCE_ID, "CLM-2026-0000001"));
 
         assertThat(payment.id()).isEqualTo(PAYMENT_ID);
+        assertThat(payment.statusReason()).isNull();
         assertThat(payment.sourceType()).isEqualTo("DIRECT_CLAIM");
         assertThat(payment.sourceId()).isEqualTo(SOURCE_ID);
         assertThat(payment.sourceReference()).isEqualTo("CLM-2026-0000001");
+        server.verify();
+    }
+
+    @Test
+    void readsTheStatusReasonFromTheExpert() {
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        PaymentClient client = new PaymentClient(builder, new ObjectMapper(), "http://localhost:8097");
+
+        server.expect(requestTo("http://localhost:8097/internal/v1/payments/" + PAYMENT_ID
+                        + "?tenantId=" + TENANT))
+                .andExpect(method(HttpMethod.GET))
+                .andRespond(withSuccess(paymentJson("CANCELLED", 4, "duplicate claim"),
+                        MediaType.APPLICATION_JSON));
+
+        PaymentDto payment = client.findById(TENANT, PAYMENT_ID);
+
+        assertThat(payment.status()).isEqualTo("CANCELLED");
+        assertThat(payment.statusReason()).isEqualTo("duplicate claim");
         server.verify();
     }
 
@@ -202,12 +222,13 @@ class PaymentClientTest {
                         """, JsonCompareMode.STRICT))
                 .andRespond(withStatus(HttpStatus.OK)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .body(paymentJson("CANCELLED", 4)));
+                        .body(paymentJson("CANCELLED", 4, "duplicate claim")));
 
         PaymentDto payment = client.changeStatus(TENANT, PAYMENT_ID, "CANCELLED", 3,
                 "duplicate claim");
 
         assertThat(payment.status()).isEqualTo("CANCELLED");
+        assertThat(payment.statusReason()).isEqualTo("duplicate claim");
         assertThat(payment.version()).isEqualTo(4);
         server.verify();
     }
@@ -232,6 +253,7 @@ class PaymentClientTest {
         PaymentDto payment = client.changeStatus(TENANT, PAYMENT_ID, "PENDING_AUTHORITY", null, null);
 
         assertThat(payment.status()).isEqualTo("PENDING_AUTHORITY");
+        assertThat(payment.statusReason()).isNull();
         assertThat(payment.version()).isEqualTo(1);
         server.verify();
     }
@@ -513,6 +535,10 @@ class PaymentClientTest {
     }
 
     private static String paymentJson(String status, int version) {
+        return paymentJson(status, version, null);
+    }
+
+    private static String paymentJson(String status, int version, String statusReason) {
         return """
                 {
                   "id": "33333333-3333-7333-8333-333333333333",
@@ -520,6 +546,7 @@ class PaymentClientTest {
                   "paymentNumber": "PAY-2026-0044721",
                   "paymentType": "INDEMNITY",
                   "status": "%s",
+                  "statusReason": %s,
                   "amount": "125000.0000",
                   "currency": "USD",
                   "payeePartyId": "22222222-2222-7222-8222-222222222222",
@@ -531,6 +558,6 @@ class PaymentClientTest {
                   "sourceId": "44444444-4444-7444-8444-444444444444",
                   "sourceReference": "CLM-2026-0000001"
                 }
-                """.formatted(status, version);
+                """.formatted(status, statusReason == null ? "null" : "\"" + statusReason + "\"", version);
     }
 }

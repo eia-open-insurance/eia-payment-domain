@@ -13,6 +13,7 @@ public record PaymentDto(
         String paymentNumber,
         String paymentType,
         String status,
+        String statusReason,
         @JsonFormat(shape = JsonFormat.Shape.STRING) BigDecimal amount,
         String currency,
         UUID payeePartyId,

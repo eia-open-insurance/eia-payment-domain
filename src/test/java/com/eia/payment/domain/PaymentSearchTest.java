@@ -256,7 +256,7 @@ class PaymentSearchTest {
     private static PaymentDto payment(UUID id, UUID tenantId, String number, String type, String status,
                                       UUID payee, Instant updatedAt,
                                       String sourceType, UUID sourceId, String sourceReference) {
-        return new PaymentDto(id, tenantId, number, type, status, new BigDecimal("125000.0000"),
+        return new PaymentDto(id, tenantId, number, type, status, null, new BigDecimal("125000.0000"),
                 "USD", payee, PAYMENT_DATE, 0, BASE, updatedAt,
                 sourceType, sourceId, sourceReference);
     }

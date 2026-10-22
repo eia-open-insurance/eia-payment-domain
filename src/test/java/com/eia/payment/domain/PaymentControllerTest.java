@@ -66,6 +66,24 @@ class PaymentControllerTest {
     }
 
     @Test
+    void exposesTheStatusReasonOnListAndGet() throws Exception {
+        PaymentDto cancelled = payment("CANCELLED", 3, "duplicate claim");
+        when(client.findAll(TENANT)).thenReturn(List.of(cancelled));
+        when(client.findById(TENANT, PAYMENT_ID)).thenReturn(cancelled);
+
+        mvc.perform(get("/api/v1/payments").header("X-EIA-Tenant", TENANT.toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].status").value("CANCELLED"))
+                .andExpect(jsonPath("$[0].statusReason").value("duplicate claim"));
+
+        mvc.perform(get("/api/v1/payments/{id}", PAYMENT_ID)
+                        .header("X-EIA-Tenant", TENANT.toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("CANCELLED"))
+                .andExpect(jsonPath("$.statusReason").value("duplicate claim"));
+    }
+
+    @Test
     void forwardsSourceFilterToTheExpert() throws Exception {
         when(client.findAll(TENANT, "DIRECT_CLAIM", SOURCE_ID.toString()))
                 .thenReturn(List.of(paymentWithSource("DIRECT_CLAIM", SOURCE_ID, "CLM-2026-0000001")));
@@ -400,12 +418,13 @@ class PaymentControllerTest {
     void authorizesPendingPayment() throws Exception {
         when(client.findById(TENANT, PAYMENT_ID)).thenReturn(payment("PENDING_AUTHORITY", 1));
         when(client.changeStatus(TENANT, PAYMENT_ID, "AUTHORIZED", 1, "authorized by payment approver"))
-                .thenReturn(payment("AUTHORIZED", 2));
+                .thenReturn(payment("AUTHORIZED", 2, "authorized by payment approver"));
 
         mvc.perform(post("/api/v1/payments/{id}/authorize", PAYMENT_ID)
                         .header("X-EIA-Tenant", TENANT.toString()))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("AUTHORIZED"))
+                .andExpect(jsonPath("$.statusReason").value("authorized by payment approver"))
                 .andExpect(jsonPath("$.version").value(2));
     }
 
@@ -424,7 +443,7 @@ class PaymentControllerTest {
     @Test
     void updatesStatusThroughTheExpert() throws Exception {
         when(client.changeStatus(TENANT, PAYMENT_ID, "CANCELLED", 2, "duplicate claim"))
-                .thenReturn(payment("CANCELLED", 3));
+                .thenReturn(payment("CANCELLED", 3, "duplicate claim"));
 
         mvc.perform(patch("/api/v1/payments/{id}/status", PAYMENT_ID)
                         .header("X-EIA-Tenant", TENANT.toString())
@@ -434,6 +453,7 @@ class PaymentControllerTest {
                                 """))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("CANCELLED"))
+                .andExpect(jsonPath("$.statusReason").value("duplicate claim"))
                 .andExpect(jsonPath("$.version").value(3));
 
         verify(client).changeStatus(TENANT, PAYMENT_ID, "CANCELLED", 2, "duplicate claim");
@@ -452,6 +472,7 @@ class PaymentControllerTest {
                                 """))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("PENDING_AUTHORITY"))
+                .andExpect(jsonPath("$.statusReason").value(nullValue()))
                 .andExpect(jsonPath("$.version").value(1));
 
         verify(client).changeStatus(TENANT, PAYMENT_ID, "PENDING_AUTHORITY", null, null);
@@ -697,13 +718,17 @@ class PaymentControllerTest {
     }
 
     private static PaymentDto payment(String status, int version) {
+        return payment(status, version, null);
+    }
+
+    private static PaymentDto payment(String status, int version, String statusReason) {
         return new PaymentDto(PAYMENT_ID, TENANT, "PAY-2026-0044721", "INDEMNITY", status,
-                new BigDecimal("125000.0000"), "USD", PAYEE, PAYMENT_DATE, version, CREATED, CREATED,
-                null, null, null);
+                statusReason, new BigDecimal("125000.0000"), "USD", PAYEE, PAYMENT_DATE, version,
+                CREATED, CREATED, null, null, null);
     }
 
     private static PaymentDto paymentWithSource(String sourceType, UUID sourceId, String sourceReference) {
-        return new PaymentDto(PAYMENT_ID, TENANT, "PAY-2026-0044721", "INDEMNITY", "DRAFT",
+        return new PaymentDto(PAYMENT_ID, TENANT, "PAY-2026-0044721", "INDEMNITY", "DRAFT", null,
                 new BigDecimal("125000.0000"), "USD", PAYEE, PAYMENT_DATE, 0, CREATED, CREATED,
                 sourceType, sourceId, sourceReference);
     }
