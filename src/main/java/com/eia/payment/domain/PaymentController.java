@@ -91,4 +91,13 @@ public class PaymentController {
                                       @RequestBody CreatePaymentAllocationCommand command) {
         return service.allocate(tenantId, id, command);
     }
+
+    @PostMapping("/{paymentId}/allocations/{allocationId}/reverse")
+    public PaymentAllocation reverseAllocation(
+            @RequestHeader("X-EIA-Tenant") UUID tenantId,
+            @PathVariable UUID paymentId,
+            @PathVariable UUID allocationId,
+            @Valid @RequestBody ReversePaymentAllocationCommand command) {
+        return service.reverseAllocation(tenantId, paymentId, allocationId, command);
+    }
 }

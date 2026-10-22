@@ -364,6 +364,8 @@ class PaymentClientTest {
 
         assertThat(summary.paymentAmount()).isEqualByComparingTo("125000.0000");
         assertThat(summary.totalAllocated()).isEqualByComparingTo("1250.0000");
+        assertThat(summary.reversedTotal()).isEqualByComparingTo("0");
+        assertThat(summary.net()).isEqualByComparingTo("1250.0000");
         assertThat(summary.unallocated()).isEqualByComparingTo("123750.0000");
         assertThat(summary.currency()).isEqualTo("USD");
         assertThat(summary.items()).singleElement().satisfies(allocation -> {
@@ -375,7 +377,64 @@ class PaymentClientTest {
             assertThat(allocation.amount()).isEqualByComparingTo("1250.0000");
             assertThat(allocation.currency()).isEqualTo("USD");
             assertThat(allocation.createdAt()).isEqualTo(Instant.parse("2026-10-20T09:15:00Z"));
+            assertThat(allocation.reversedAt()).isNull();
+            assertThat(allocation.reversalReason()).isNull();
         });
+        server.verify();
+    }
+
+    @Test
+    void readsTheReversalFiguresFromTheSummary() {
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        PaymentClient client = new PaymentClient(builder, new ObjectMapper(), "http://localhost:8097");
+
+        server.expect(requestTo("http://localhost:8097/internal/v1/payments/" + PAYMENT_ID
+                        + "/allocations?tenantId=" + TENANT))
+                .andExpect(method(HttpMethod.GET))
+                .andExpect(header(PaymentClient.TENANT_HEADER, TENANT.toString()))
+                .andRespond(withSuccess(reversedAllocationSummaryJson(), MediaType.APPLICATION_JSON));
+
+        PaymentAllocationSummary summary = client.findAllocations(TENANT, PAYMENT_ID);
+
+        assertThat(summary.paymentAmount()).isEqualByComparingTo("125000.0000");
+        assertThat(summary.totalAllocated()).isEqualByComparingTo("2250.0000");
+        assertThat(summary.reversedTotal()).isEqualByComparingTo("1000.0000");
+        assertThat(summary.net()).isEqualByComparingTo("1250.0000");
+        assertThat(summary.unallocated()).isEqualByComparingTo("123750.0000");
+        assertThat(summary.items()).hasSize(2);
+        assertThat(summary.items().get(1).reversedAt())
+                .isEqualTo(Instant.parse("2026-10-22T08:00:00Z"));
+        assertThat(summary.items().get(1).reversalReason()).isEqualTo("duplicate payment");
+        server.verify();
+    }
+
+    @Test
+    void derivesReversalFiguresWhenAnOlderExpertOmitsThem() {
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        PaymentClient client = new PaymentClient(builder, new ObjectMapper(), "http://localhost:8097");
+
+        server.expect(requestTo("http://localhost:8097/internal/v1/payments/" + PAYMENT_ID
+                        + "/allocations?tenantId=" + TENANT))
+                .andExpect(method(HttpMethod.GET))
+                .andExpect(header(PaymentClient.TENANT_HEADER, TENANT.toString()))
+                .andRespond(withSuccess("""
+                        {
+                          "items": [%s],
+                          "paymentAmount": "125000.0000",
+                          "totalAllocated": "1250.0000",
+                          "currency": "USD"
+                        }
+                        """.formatted(allocationJson()),
+                        MediaType.APPLICATION_JSON));
+
+        PaymentAllocationSummary summary = client.findAllocations(TENANT, PAYMENT_ID);
+
+        assertThat(summary.totalAllocated()).isEqualByComparingTo("1250.0000");
+        assertThat(summary.reversedTotal()).isEqualByComparingTo("0");
+        assertThat(summary.net()).isEqualByComparingTo("1250.0000");
+        assertThat(summary.unallocated()).isEqualByComparingTo("123750.0000");
         server.verify();
     }
 
@@ -408,6 +467,122 @@ class PaymentClientTest {
         assertThat(allocation.component()).isEqualTo("INDEMNITY");
         assertThat(allocation.amount()).isEqualByComparingTo("1250.0000");
         assertThat(allocation.currency()).isEqualTo("USD");
+        server.verify();
+    }
+
+    @Test
+    void reversesAnAllocationWithTenantForwarded() {
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        PaymentClient client = new PaymentClient(builder, new ObjectMapper(), "http://localhost:8097");
+
+        server.expect(requestTo("http://localhost:8097/internal/v1/payments/" + PAYMENT_ID
+                        + "/allocations/" + ALLOCATION_ID + "/reverse?tenantId=" + TENANT))
+                .andExpect(method(HttpMethod.POST))
+                .andExpect(header(PaymentClient.TENANT_HEADER, TENANT.toString()))
+                .andExpect(content().json("""
+                        {"reason":"duplicate payment"}
+                        """, JsonCompareMode.STRICT))
+                .andRespond(withSuccess(reversedAllocationJson(), MediaType.APPLICATION_JSON));
+
+        PaymentAllocation allocation = client.reverseAllocation(TENANT, PAYMENT_ID,
+                ALLOCATION_ID, new ReversePaymentAllocationCommand("duplicate payment"));
+
+        assertThat(allocation.allocationId()).isEqualTo(ALLOCATION_ID);
+        assertThat(allocation.paymentId()).isEqualTo(PAYMENT_ID);
+        assertThat(allocation.amount()).isEqualByComparingTo("1000.0000");
+        assertThat(allocation.reversedAt()).isEqualTo(Instant.parse("2026-10-22T08:00:00Z"));
+        assertThat(allocation.reversalReason()).isEqualTo("duplicate payment");
+        server.verify();
+    }
+
+    @Test
+    void preservesTheExpertReversalBadRequest() {
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        PaymentClient client = new PaymentClient(builder, new ObjectMapper(), "http://localhost:8097");
+
+        server.expect(requestTo("http://localhost:8097/internal/v1/payments/" + PAYMENT_ID
+                        + "/allocations/" + ALLOCATION_ID + "/reverse?tenantId=" + TENANT))
+                .andExpect(method(HttpMethod.POST))
+                .andExpect(header(PaymentClient.TENANT_HEADER, TENANT.toString()))
+                .andRespond(withStatus(HttpStatus.BAD_REQUEST)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .body("""
+                                {"status":400,"code":"INVALID_REVERSAL_REASON",
+                                 "message":"A reversal reason is required",
+                                 "path":"/internal/v1/payments","details":[]}
+                                """));
+
+        assertThatThrownBy(() -> client.reverseAllocation(TENANT, PAYMENT_ID, ALLOCATION_ID,
+                new ReversePaymentAllocationCommand("duplicate payment")))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> {
+                    ApiException api = (ApiException) ex;
+                    assertThat(api.status()).isEqualTo(HttpStatus.BAD_REQUEST);
+                    assertThat(api.code()).isEqualTo("INVALID_REVERSAL_REASON");
+                    assertThat(api.getMessage()).isEqualTo("A reversal reason is required");
+                });
+        server.verify();
+    }
+
+    @Test
+    void preservesTheExpertAllocationNotFoundOnReversal() {
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        PaymentClient client = new PaymentClient(builder, new ObjectMapper(), "http://localhost:8097");
+
+        server.expect(requestTo("http://localhost:8097/internal/v1/payments/" + PAYMENT_ID
+                        + "/allocations/" + ALLOCATION_ID + "/reverse?tenantId=" + TENANT))
+                .andExpect(method(HttpMethod.POST))
+                .andExpect(header(PaymentClient.TENANT_HEADER, TENANT.toString()))
+                .andRespond(withStatus(HttpStatus.NOT_FOUND)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .body("""
+                                {"status":404,"code":"ALLOCATION_NOT_FOUND",
+                                 "message":"Allocation not found: 55555555-5555-7555-8555-555555555555",
+                                 "path":"/internal/v1/payments","details":[]}
+                                """));
+
+        assertThatThrownBy(() -> client.reverseAllocation(TENANT, PAYMENT_ID, ALLOCATION_ID,
+                new ReversePaymentAllocationCommand("duplicate payment")))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> {
+                    ApiException api = (ApiException) ex;
+                    assertThat(api.status()).isEqualTo(HttpStatus.NOT_FOUND);
+                    assertThat(api.code()).isEqualTo("ALLOCATION_NOT_FOUND");
+                    assertThat(api.getMessage()).contains("Allocation not found");
+                });
+        server.verify();
+    }
+
+    @Test
+    void preservesTheExpertReversalConflict() {
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        PaymentClient client = new PaymentClient(builder, new ObjectMapper(), "http://localhost:8097");
+
+        server.expect(requestTo("http://localhost:8097/internal/v1/payments/" + PAYMENT_ID
+                        + "/allocations/" + ALLOCATION_ID + "/reverse?tenantId=" + TENANT))
+                .andExpect(method(HttpMethod.POST))
+                .andExpect(header(PaymentClient.TENANT_HEADER, TENANT.toString()))
+                .andRespond(withStatus(HttpStatus.CONFLICT)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .body("""
+                                {"status":409,"code":"ALLOCATION_ALREADY_REVERSED",
+                                 "message":"Allocation 55555555-5555-7555-8555-555555555555 is already reversed",
+                                 "path":"/internal/v1/payments","details":[]}
+                                """));
+
+        assertThatThrownBy(() -> client.reverseAllocation(TENANT, PAYMENT_ID, ALLOCATION_ID,
+                new ReversePaymentAllocationCommand("duplicate payment")))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> {
+                    ApiException api = (ApiException) ex;
+                    assertThat(api.status()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(api.code()).isEqualTo("ALLOCATION_ALREADY_REVERSED");
+                    assertThat(api.getMessage()).contains("already reversed");
+                });
         server.verify();
     }
 
@@ -514,6 +689,19 @@ class PaymentClientTest {
                 """.formatted(allocationJson());
     }
 
+    private static String reversedAllocationSummaryJson() {
+        return """
+                {
+                  "items": [%s, %s],
+                  "paymentAmount": "125000.0000",
+                  "totalAllocated": "1250.0000",
+                  "reversedTotal": "1000.0000",
+                  "unallocated": "123750.0000",
+                  "currency": "USD"
+                }
+                """.formatted(allocationJson(), reversedAllocationJson());
+    }
+
     /** The expert's public allocation item already uses the public field names. */
     private static String allocationJson() {
         return """
@@ -526,6 +714,24 @@ class PaymentClientTest {
                   "amount": "1250.0000",
                   "currency": "USD",
                   "createdAt": "2026-10-20T09:15:00Z"
+                }
+                """;
+    }
+
+    /** A reversed allocation keeps the original split facts and adds the reversal stamp. */
+    private static String reversedAllocationJson() {
+        return """
+                {
+                  "allocationId": "55555555-5555-7555-8555-555555555555",
+                  "paymentId": "33333333-3333-7333-8333-333333333333",
+                  "targetType": "DIRECT_CLAIM",
+                  "targetId": "44444444-4444-7444-8444-444444444444",
+                  "component": "INDEMNITY",
+                  "amount": "1000.0000",
+                  "currency": "USD",
+                  "createdAt": "2026-10-20T09:15:00Z",
+                  "reversedAt": "2026-10-22T08:00:00Z",
+                  "reversalReason": "duplicate payment"
                 }
                 """;
     }

@@ -707,6 +707,188 @@ class PaymentControllerTest {
         verify(client, never()).findAllocations(any(), any());
     }
 
+    @Test
+    void returnsReversalTotalsInTheAllocationSummary() throws Exception {
+        when(client.findAllocations(TENANT, PAYMENT_ID)).thenReturn(reversedAllocationSummary());
+
+        mvc.perform(get("/api/v1/payments/{id}/allocations", PAYMENT_ID)
+                        .header("X-EIA-Tenant", TENANT.toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items[0].reversedAt").value(nullValue()))
+                .andExpect(jsonPath("$.items[0].reversalReason").value(nullValue()))
+                .andExpect(jsonPath("$.items[1].reversedAt").value("2026-10-22T08:00:00Z"))
+                .andExpect(jsonPath("$.items[1].reversalReason").value("duplicate payment"))
+                .andExpect(jsonPath("$.paymentAmount").value("125000.0000"))
+                .andExpect(jsonPath("$.totalAllocated").value("2250.0000"))
+                .andExpect(jsonPath("$.reversedTotal").value("1000.0000"))
+                .andExpect(jsonPath("$.net").value("1250.0000"))
+                .andExpect(jsonPath("$.unallocated").value("123750.0000"))
+                .andExpect(jsonPath("$.currency").value("USD"));
+
+        verify(client).findAllocations(TENANT, PAYMENT_ID);
+    }
+
+    @Test
+    void reversesAnAllocation() throws Exception {
+        when(client.reverseAllocation(eq(TENANT), eq(PAYMENT_ID), eq(ALLOCATION_ID),
+                any(ReversePaymentAllocationCommand.class))).thenReturn(reversedAllocation());
+
+        mvc.perform(post("/api/v1/payments/{id}/allocations/{allocationId}/reverse",
+                        PAYMENT_ID, ALLOCATION_ID)
+                        .header("X-EIA-Tenant", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"reason":"  duplicate payment  "}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.allocationId").value(ALLOCATION_ID.toString()))
+                .andExpect(jsonPath("$.paymentId").value(PAYMENT_ID.toString()))
+                .andExpect(jsonPath("$.targetType").value("DIRECT_CLAIM"))
+                .andExpect(jsonPath("$.component").value("INDEMNITY"))
+                .andExpect(jsonPath("$.amount").value("1000.0000"))
+                .andExpect(jsonPath("$.reversedAt").value("2026-10-22T08:00:00Z"))
+                .andExpect(jsonPath("$.reversalReason").value("duplicate payment"));
+
+        ArgumentCaptor<ReversePaymentAllocationCommand> captor =
+                ArgumentCaptor.forClass(ReversePaymentAllocationCommand.class);
+        verify(client).reverseAllocation(eq(TENANT), eq(PAYMENT_ID), eq(ALLOCATION_ID),
+                captor.capture());
+        assertThat(captor.getValue().reason()).isEqualTo("  duplicate payment  ");
+    }
+
+    @Test
+    void rejectsAReversalWithoutAReasonBeforeCallingExpert() throws Exception {
+        mvc.perform(post("/api/v1/payments/{id}/allocations/{allocationId}/reverse",
+                        PAYMENT_ID, ALLOCATION_ID)
+                        .header("X-EIA-Tenant", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"reason":"   "}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"))
+                .andExpect(jsonPath("$.details[0].field").value("reason"));
+
+        verify(client, never()).reverseAllocation(any(), any(), any(),
+                any(ReversePaymentAllocationCommand.class));
+    }
+
+    @Test
+    void rejectsAReversalReasonLongerThanTwoHundredCharactersBeforeCallingExpert() throws Exception {
+        mvc.perform(post("/api/v1/payments/{id}/allocations/{allocationId}/reverse",
+                        PAYMENT_ID, ALLOCATION_ID)
+                        .header("X-EIA-Tenant", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"reason":"%s"}
+                                """.formatted("x".repeat(201))))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"))
+                .andExpect(jsonPath("$.details[0].field").value("reason"));
+
+        verify(client, never()).reverseAllocation(any(), any(), any(),
+                any(ReversePaymentAllocationCommand.class));
+    }
+
+    @Test
+    void requiresTenantForAllocationReversal() throws Exception {
+        mvc.perform(post("/api/v1/payments/{id}/allocations/{allocationId}/reverse",
+                        PAYMENT_ID, ALLOCATION_ID)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"reason":"duplicate payment"}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("MISSING_TENANT_HEADER"));
+
+        verify(client, never()).reverseAllocation(any(), any(), any(),
+                any(ReversePaymentAllocationCommand.class));
+    }
+
+    @Test
+    void preservesTheExpertReversalBadRequest() throws Exception {
+        when(client.reverseAllocation(eq(TENANT), eq(PAYMENT_ID), eq(ALLOCATION_ID),
+                any(ReversePaymentAllocationCommand.class))).thenThrow(new ApiException(
+                HttpStatus.BAD_REQUEST, "INVALID_REVERSAL_REASON",
+                "A reversal reason is required"));
+
+        mvc.perform(post("/api/v1/payments/{id}/allocations/{allocationId}/reverse",
+                        PAYMENT_ID, ALLOCATION_ID)
+                        .header("X-EIA-Tenant", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"reason":"duplicate payment"}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.code").value("INVALID_REVERSAL_REASON"))
+                .andExpect(jsonPath("$.message").value("A reversal reason is required"))
+                .andExpect(jsonPath("$.path").value(
+                        "/api/v1/payments/" + PAYMENT_ID + "/allocations/" + ALLOCATION_ID
+                                + "/reverse"));
+    }
+
+    @Test
+    void preservesTheExpertReversalNotFound() throws Exception {
+        when(client.reverseAllocation(eq(TENANT), eq(PAYMENT_ID), eq(ALLOCATION_ID),
+                any(ReversePaymentAllocationCommand.class))).thenThrow(new ApiException(
+                HttpStatus.NOT_FOUND, "ALLOCATION_NOT_FOUND",
+                "Allocation not found: " + ALLOCATION_ID));
+
+        mvc.perform(post("/api/v1/payments/{id}/allocations/{allocationId}/reverse",
+                        PAYMENT_ID, ALLOCATION_ID)
+                        .header("X-EIA-Tenant", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"reason":"duplicate payment"}
+                                """))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.status").value(404))
+                .andExpect(jsonPath("$.code").value("ALLOCATION_NOT_FOUND"))
+                .andExpect(jsonPath("$.message").value("Allocation not found: " + ALLOCATION_ID));
+    }
+
+    @Test
+    void preservesTheExpertReversalConflict() throws Exception {
+        when(client.reverseAllocation(eq(TENANT), eq(PAYMENT_ID), eq(ALLOCATION_ID),
+                any(ReversePaymentAllocationCommand.class))).thenThrow(new ApiException(
+                HttpStatus.CONFLICT, "ALLOCATION_ALREADY_REVERSED",
+                "Allocation " + ALLOCATION_ID + " is already reversed"));
+
+        mvc.perform(post("/api/v1/payments/{id}/allocations/{allocationId}/reverse",
+                        PAYMENT_ID, ALLOCATION_ID)
+                        .header("X-EIA-Tenant", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"reason":"duplicate payment"}
+                                """))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.status").value(409))
+                .andExpect(jsonPath("$.code").value("ALLOCATION_ALREADY_REVERSED"))
+                .andExpect(jsonPath("$.message").value(
+                        "Allocation " + ALLOCATION_ID + " is already reversed"));
+    }
+
+    @Test
+    void preservesTheExpertReversalWhenThePaymentIsNotAllocatable() throws Exception {
+        when(client.reverseAllocation(eq(TENANT), eq(PAYMENT_ID), eq(ALLOCATION_ID),
+                any(ReversePaymentAllocationCommand.class))).thenThrow(new ApiException(
+                HttpStatus.CONFLICT, "PAYMENT_NOT_ALLOCATABLE",
+                "Payment PAY-2026-0044721 is CANCELLED and cannot be allocated"));
+
+        mvc.perform(post("/api/v1/payments/{id}/allocations/{allocationId}/reverse",
+                        PAYMENT_ID, ALLOCATION_ID)
+                        .header("X-EIA-Tenant", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"reason":"duplicate payment"}
+                                """))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("PAYMENT_NOT_ALLOCATABLE"))
+                .andExpect(jsonPath("$.message").value(
+                        "Payment PAY-2026-0044721 is CANCELLED and cannot be allocated"));
+    }
+
     private static CreatePaymentCommand command(BigDecimal amount, String currency, String paymentType) {
         return command(amount, currency, paymentType, null, null, null);
     }
@@ -738,8 +920,21 @@ class PaymentControllerTest {
                 new BigDecimal("1250.0000"), "USD", CREATED);
     }
 
+    private static PaymentAllocation reversedAllocation() {
+        return new PaymentAllocation(ALLOCATION_ID, PAYMENT_ID, "DIRECT_CLAIM", SOURCE_ID, "INDEMNITY",
+                new BigDecimal("1000.0000"), "USD", CREATED,
+                Instant.parse("2026-10-22T08:00:00Z"), "duplicate payment");
+    }
+
     private static PaymentAllocationSummary allocationSummary() {
         return new PaymentAllocationSummary(List.of(allocation()), new BigDecimal("125000.0000"),
                 new BigDecimal("1250.0000"), new BigDecimal("123750.0000"), "USD");
+    }
+
+    private static PaymentAllocationSummary reversedAllocationSummary() {
+        return new PaymentAllocationSummary(List.of(allocation(), reversedAllocation()),
+                new BigDecimal("125000.0000"), new BigDecimal("2250.0000"),
+                new BigDecimal("1000.0000"), new BigDecimal("1250.0000"),
+                new BigDecimal("123750.0000"), "USD");
     }
 }

@@ -153,24 +153,81 @@ public class PaymentClient {
         }
     }
 
+    /**
+     * Reverses one allocation through the expert, which owns the active-row
+     * check, the tenant and payment/allocation match, and the net-allocation
+     * arithmetic. The domain forwards the reason and preserves the expert's
+     * 400/404/409 problem code and message unchanged.
+     */
+    public PaymentAllocation reverseAllocation(UUID tenantId, UUID paymentId, UUID allocationId,
+                                               ReversePaymentAllocationCommand command) {
+        try {
+            return client.post()
+                    .uri(uri -> uri.path(
+                                    "/internal/v1/payments/{id}/allocations/{allocationId}/reverse")
+                            .queryParam("tenantId", tenantId)
+                            .build(paymentId, allocationId))
+                    .header(TENANT_HEADER, tenantId.toString())
+                    .body(command)
+                    .retrieve()
+                    .body(PaymentAllocation.class);
+        } catch (RestClientResponseException ex) {
+            throw translate(ex);
+        }
+    }
+
+    /** Convenience overload for callers that already hold the reversal reason. */
+    public PaymentAllocation reverseAllocation(UUID tenantId, UUID paymentId, UUID allocationId,
+                                               String reason) {
+        return reverseAllocation(tenantId, paymentId, allocationId,
+                new ReversePaymentAllocationCommand(reason));
+    }
+
+    /**
+     * The expert owns the allocation rows and totals. Its summary reports
+     * {@code totalAllocated} net of reversals and a separate
+     * {@code reversedTotal}, because a reversed row no longer consumes the
+     * payment amount. The public shape keeps the gross allocated total and adds
+     * {@code net}; a projection that omits the reversal figures is derived from
+     * the rows. {@code unallocated} is normalized against the net amount when
+     * the expert omits it.
+     */
     private static PaymentAllocationSummary normalize(PaymentAllocationSummary summary) {
         if (summary == null) {
-            return new PaymentAllocationSummary(List.of(), null, BigDecimal.ZERO, null, null);
+            return new PaymentAllocationSummary(List.of(), null, BigDecimal.ZERO,
+                    BigDecimal.ZERO, BigDecimal.ZERO, null, null);
         }
         List<PaymentAllocation> items = summary.items() == null ? List.of() : summary.items();
-        BigDecimal totalAllocated = summary.totalAllocated();
-        if (totalAllocated == null) {
-            totalAllocated = items.stream()
-                    .map(PaymentAllocation::amount)
-                    .filter(amount -> amount != null)
-                    .reduce(BigDecimal.ZERO, BigDecimal::add);
+        BigDecimal reversedTotal = summary.reversedTotal();
+        if (reversedTotal == null) {
+            reversedTotal = sumAmounts(items, true);
         }
+        BigDecimal expertTotal = summary.totalAllocated();
+        BigDecimal net = summary.net();
+        if (net == null) {
+            net = expertTotal != null ? expertTotal : sumAmounts(items, false);
+        }
+        BigDecimal totalAllocated = expertTotal != null
+                ? expertTotal.add(reversedTotal)
+                : net.add(reversedTotal);
         BigDecimal unallocated = summary.unallocated();
         if (unallocated == null && summary.paymentAmount() != null) {
-            unallocated = summary.paymentAmount().subtract(totalAllocated);
+            unallocated = summary.paymentAmount().subtract(net);
         }
         return new PaymentAllocationSummary(items, summary.paymentAmount(), totalAllocated,
-                unallocated, summary.currency());
+                reversedTotal, net, unallocated, summary.currency());
+    }
+
+    /**
+     * Sums the amounts of the reversed or active rows, depending on
+     * {@code reversed}, so a summary without the reversal figures still adds up.
+     */
+    private static BigDecimal sumAmounts(List<PaymentAllocation> items, boolean reversed) {
+        return items.stream()
+                .filter(allocation -> (allocation.reversedAt() != null) == reversed)
+                .map(PaymentAllocation::amount)
+                .filter(amount -> amount != null)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
     }
 
     private ApiException translate(RestClientResponseException ex) {
@@ -191,7 +248,10 @@ public class PaymentClient {
             message = "Payment expert request failed with status " + status;
         }
         if (status == 404) {
-            return new ApiException(HttpStatus.NOT_FOUND, "PAYMENT_NOT_FOUND", message);
+            // The expert distinguishes a missing payment from a missing
+            // allocation; keep its stable code instead of collapsing both to
+            // PAYMENT_NOT_FOUND.
+            return new ApiException(HttpStatus.NOT_FOUND, code, message);
         }
         HttpStatus resolved = HttpStatus.resolve(status);
         if (resolved != null && resolved.is4xxClientError()) {

@@ -148,6 +148,18 @@ public class PaymentService {
                 PaymentAllocationRules.normalize(command));
     }
 
+    /**
+     * Reverses one allocation. The expert owns the active-row, tenant, and
+     * payment-match rules and the net-allocation arithmetic, so its
+     * 400/404/409 problems are preserved for the caller instead of being
+     * re-derived here. The reversed row keeps its amount for audit and is
+     * reported through the summary's reversed total and net.
+     */
+    public PaymentAllocation reverseAllocation(UUID tenantId, UUID paymentId, UUID allocationId,
+                                               ReversePaymentAllocationCommand command) {
+        return client.reverseAllocation(tenantId, paymentId, allocationId, command);
+    }
+
     private static boolean matches(PaymentDto payment, String query) {
         if (query.isEmpty()) {
             return true;
